@@ -1,0 +1,94 @@
+// minfer — a 784->128->10 MLP forward pass over dense float vectors.
+//
+//   minfer <weights.bin>          the 10 outputs, as raw IEEE bits (hi lo)
+//   minfer <weights.bin> bench N  N forward passes, then the time in ms
+//
+// The point is the shape, not the network: Vec[R, float] is a dense
+// double array on every backend, and this program holds it to that —
+// verify.sh compares the output BITS against a Python oracle that ran the
+// same accumulation order over the same weight file, and then runs the
+// same program on all four backends expecting the same transcript.
+// Printing bits instead of digits keeps string formatting out of a claim
+// that is about arithmetic.
+
+let in_n = 784;
+let hid_n = 128;
+let out_n = 10;
+
+// f64 little-endian at byte offset `off` of a byte vec, via the bits
+// builtins (the ascription pins the element type so every backend
+// monomorphizes the same way)
+let f64_at = fn data -> fn (off: int) ->
+  let b = fn (k: int) -> (vec_get data (off + k) : int) in
+  let lo = b 0 + b 1 * 256 + b 2 * 65536 + b 3 * 16777216 in
+  let hi = b 4 + b 5 * 256 + b 6 * 65536 + b 7 * 16777216 in
+  float_of_bits hi lo;
+
+// one dense float vec from `count` doubles starting at byte `off`
+let load_slice = fn data -> fn (off: int) -> fn (count: int) ->
+  let v = vec_new () in
+  let rec go = fn (i: int) ->
+    if i == count then ()
+    else let _ = vec_push v (f64_at data (off + i * 8)) in go (i + 1) in
+  let _ = go 0 in
+  v;
+
+let forward = fn w1 -> fn b1 -> fn w2 -> fn b2 -> fn x ->
+  let h = vec_new () in
+  let rec hidden = fn (j: int) ->
+    if j == hid_n then ()
+    else
+      let rec dot = fn (i: int) -> fn (acc: float) ->
+        if i == in_n then acc
+        else dot (i + 1) (acc + (vec_get w1 (j * in_n + i) : float) * (vec_get x i : float)) in
+      let a = dot 0 ((vec_get b1 j) : float) in
+      let _ = vec_push h (if a > 0.0 then a else 0.0) in
+      hidden (j + 1) in
+  let _ = hidden 0 in
+  let y = vec_new () in
+  let rec output = fn (k: int) ->
+    if k == out_n then ()
+    else
+      let rec dot = fn (j: int) -> fn (acc: float) ->
+        if j == hid_n then acc
+        else dot (j + 1) (acc + (vec_get w2 (k * hid_n + j) : float) * (vec_get h j : float)) in
+      let _ = vec_push y (dot 0 ((vec_get b2 k) : float)) in
+      output (k + 1) in
+  let _ = output 0 in
+  y;
+
+extern fn now_ms: unit -> int;
+
+let main = fn () ->
+  match args () with
+  | Cons (path, rest) ->
+    let data = read_file_bytes path in
+    let w1 = load_slice data 0 (hid_n * in_n) in
+    let b1 = load_slice data (hid_n * in_n * 8) hid_n in
+    let w2 = load_slice data ((hid_n * in_n + hid_n) * 8) (out_n * hid_n) in
+    let b2 = load_slice data ((hid_n * in_n + hid_n + out_n * hid_n) * 8) out_n in
+    let x = load_slice data ((hid_n * in_n + hid_n + out_n * hid_n + out_n) * 8) in_n in
+    (match rest with
+     | Cons ("bench", Cons (n_s, _)) ->
+       let n = int_of_str n_s in
+       let t0 = now_ms () in
+       let rec go = fn (i: int) -> fn (sink: float) ->
+         if i == n then sink
+         else
+           let y = forward w1 b1 w2 b2 x in
+           go (i + 1) (sink + ((vec_get y 0) : float)) in
+       let s = go 0 0.0 in
+       let t1 = now_ms () in
+       let _ = print (str_of_int (t1 - t0) ++ " ms") in
+       print (str_of_int (float_bits_hi s))
+     | _ ->
+       let y = forward w1 b1 w2 b2 x in
+       let rec show = fn (k: int) ->
+         if k == out_n then ()
+         else
+           let v = vec_get y k in
+           let _ = print (str_of_int (float_bits_hi v) ++ " " ++ str_of_int (float_bits_lo v)) in
+           show (k + 1) in
+       show 0)
+  | _ -> print "usage: minfer <weights.bin> [bench N]";
+main ()
