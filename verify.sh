@@ -30,7 +30,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 python3 "$DIR/gen_weights.py" "$TMP/weights.bin"
 python3 "$DIR/gen_weights.py" "$TMP/weights.bin" --oracle > "$TMP/want10"
-{ cat "$TMP/want10"; echo "()"; } > "$TMP/want"
+# A unit main prints nothing since mere v0.1.494 (Q-136); this expected a
+# trailing "()" line from before that, and every backend has been "wrong"
+# against it since.
+cp "$TMP/want10" "$TMP/want"
 
 # --- oracle: the -O2 native binary reproduces every bit ------------------------
 "$M" -c "$DIR/minfer.mere" > "$TMP/minfer.c" 2>"$TMP/err" \
